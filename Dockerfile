@@ -89,4 +89,3 @@ USER nonrootuser
 
 # Define the entrypoint
 ENTRYPOINT ["/usr/local/bin/app"]
-    
