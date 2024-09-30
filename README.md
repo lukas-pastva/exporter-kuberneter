@@ -16,29 +16,32 @@ Usage
 deployments:
 
   exporter-kubernetes:
-    image: lukaspastva/exporter-kubernetes:1.0
+    image: lukaspastva/exporter-kubernetes:1.0.2
     resources:
       limits:
-        memory: 50Mi
+        memory: 350Mi
       requests:
         cpu: 30m
-        memory: 30Mi
+        memory: 100Mi
     # TODO podSecurityContextRestricted: true
     ports:
       - name: http
         port: 9199
+    rbacDisabled: true
     serviceMonitor:
       enabled: true
       interval: 3600s
 
 extraObjects:
-
 - apiVersion: rbac.authorization.k8s.io/v1
   kind: ClusterRole
   metadata:
     name: exporter-kubernetes
+    labels:
+      argocd.argoproj.io/instance: exporter-kubernetes
   rules:
-    - apiGroups: [""]
+    - apiGroups:
+        - ""
       resources:
         - pods
         - namespaces
@@ -47,44 +50,31 @@ extraObjects:
       verbs:
         - get
         - list
-
+    - apiGroups:
+        - authentication.k8s.io
+      resources:
+        - serviceaccounts/token
+      verbs:
+        - create
+        - get
+    - apiGroups:
+        - ""
+      resources:
+        - pods/exec
+      verbs:
+        - create
 - apiVersion: rbac.authorization.k8s.io/v1
   kind: ClusterRoleBinding
   metadata:
     name: exporter-kubernetes
-  subjects:
-    - kind: ServiceAccount
-      name: exporter-kubernetes
-      namespace: exporter
   roleRef:
+    apiGroup: rbac.authorization.k8s.io
     kind: ClusterRole
     name: exporter-kubernetes
-    apiGroup: rbac.authorization.k8s.io
-
-- apiVersion: rbac.authorization.k8s.io/v1
-  kind: Role
-  metadata:
-    name: exporter-kubernetes
-    namespace: exporter
-  rules:
-    - apiGroups: ["authentication.k8s.io"]
-      resources: ["tokenrequests"]
-      verbs: ["create"]
-
-- apiVersion: rbac.authorization.k8s.io/v1
-  kind: RoleBinding
-  metadata:
-    name: exporter-kubernetes
-    namespace: exporter
   subjects:
     - kind: ServiceAccount
       name: exporter-kubernetes
       namespace: exporter
-  roleRef:
-    kind: Role
-    name: exporter-kubernetes
-    apiGroup: rbac.authorization.k8s.io
-
 ```
 
 ### PrometheusRules
