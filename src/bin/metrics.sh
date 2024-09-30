@@ -30,11 +30,12 @@ escape_label_value() {
 metric_add() {
     local metric="$1"
     if ! grep -Fxq "$metric" "$METRICS_FILE"; then
-        echo "Adding metric: $metric" >&2
+        # echo "Adding metric: $metric" >&2
         echo "$metric" >> "$METRICS_FILE"
     else
         echo "Duplicate metric found, not adding: $metric" >&2
     fi
+    # echo ""
 }
 
 # Function to handle kubectl exec commands without echoing responses on failure
@@ -59,7 +60,9 @@ safe_exec() {
 check_pod_api_access() {
     local pod_name="$1"
     local namespace="$2"
-    local container_name="$3"  # Optional: Specify container name if needed
+    local container_name="$3"
+
+    echo "Processing namespace: $namespace, pod_name: $pod_name, container_name: $container_name ."
 
     # Define the API request command with conditional use of curl or wget
     api_command='
@@ -108,48 +111,37 @@ check_pod_api_access() {
 
 # Function to collect metrics once
 collect_metrics() {
-    echo "Starting metric collection" >&2
-
     # Fetch all namespaces
-    echo "Fetching list of namespaces" >&2
     namespaces=$(kubectl get namespaces --no-headers -o custom-columns=":metadata.name")
 
-    echo "Namespaces found: $namespaces" >&2
+    # echo "Namespaces found: $namespaces" >&2
     for ns in $namespaces; do
         if is_excluded_namespace "$ns"; then
             echo "Skipping excluded namespace: $ns" >&2
             continue
         fi
 
-        echo "Processing namespace: $ns" >&2
-        echo "Fetching pods in namespace $ns" >&2
         pods=$(kubectl get pods -n "$ns" --no-headers -o custom-columns=":metadata.name")
 
-        echo "Pods found in namespace $ns: $pods" >&2
+        # echo "Pods found in namespace $ns: $pods" >&2
         for pod in $pods; do
             container_name=""
             check_pod_api_access "$pod" "$ns" "$container_name" &
         done
     done
 
-    # Add a heartbeat metric
-    echo "Adding heartbeat metric" >&2
     metric_add "k8s_api_access_heartbeat $(date +%s)"
 }
 
 # Configuration
 METRICS_FILE="/tmp/metrics.log"
 CURRENT_MIN=$((10#$(date +%M)))
-RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"59"}  # Adjust as needed
+RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"5"}
 EPOCH=$(date +%s)
 
 if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
-    echo "Current minute ($CURRENT_MIN) is less than RUN_BEFORE_MINUTE ($RUN_BEFORE_MINUTE), starting metric collection" >&2
-
-    echo "Clearing metrics file $METRICS_FILE" >&2
     echo "" > "$METRICS_FILE"
 
-    echo "Adding initial metrics" >&2
     metric_add "# scraping start $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     metric_add "kubernetes_heart_beat ${EPOCH}"
     metric_add "# HELP k8s_pod_api_access Whether a pod has access to the Kubernetes API."
@@ -160,5 +152,3 @@ if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
 else
     echo "Current minute ($CURRENT_MIN) is not less than RUN_BEFORE_MINUTE ($RUN_BEFORE_MINUTE), skipping metric collection" >&2
 fi
-
-echo "Script completed at $(date)" >&2
