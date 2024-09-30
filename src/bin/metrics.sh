@@ -23,122 +23,40 @@ metric_add() {
     fi
 }
 
-# Function to handle API requests with detailed error logging
-safe_curl() {
-    local url="$1"
-    local method="${2:-GET}"
-    local data="${3:-}"
-    shift 3
-    local headers=("$@")
+# Function to handle kubectl exec commands with detailed error logging
+safe_exec() {
+    local pod="$1"
+    local namespace="$2"
+    local command="$3"
 
-    local max_retries=3
-    local attempt=1
-    local delay=5
+    echo "Executing command in pod $pod (namespace: $namespace): $command" >&2
 
-    while [[ $attempt -le $max_retries ]]; do
-        echo "Attempt $attempt: Making API request to URL: $url with method: $method" >&2
+    # Execute the command inside the pod
+    response=$(kubectl exec "$pod" -n "$namespace" -- $command 2>&1)
+    exit_code=$?
 
-        # Prefix each header with -H
-        local curl_headers=()
-        for header in "${headers[@]}"; do
-            curl_headers+=("-H" "$header")
-        done
-
-        local response
-        local http_code
-        response=$(curl -k -s -w "%{http_code}" -X "$method" "${curl_headers[@]}" "$url" -d "$data")
-        http_code="${response: -3}"
-        response="${response:0:${#response}-3}"
-
-        if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-            echo "API request to $url succeeded on attempt $attempt" >&2
-            echo "$response"
-            return 0
-        else
-            echo "API request to $url failed with HTTP status $http_code on attempt $attempt" >&2
-            echo "Response body: $response" >&2
-            if [[ $attempt -lt $max_retries ]]; then
-                echo "Retrying in $delay seconds..." >&2
-                sleep $delay
-            fi
-        fi
-
-        ((attempt++))
-    done
-
-    echo "API request to $url failed after $max_retries attempts" >&2
-    return 1
-}
-
-
-# Function to request a token using the TokenRequest API
-request_token() {
-    local namespace="$1"
-    local service_account="$2"
-
-    echo "Requesting token for service account $service_account in namespace $namespace" >&2
-
-    # Create the JSON payload for the TokenRequest
-    local payload
-    payload=$(cat <<EOF
-{
-    "apiVersion": "authentication.k8s.io/v1",
-    "kind": "TokenRequest",
-    "spec": {
-        "audiences": ["kubernetes.default.svc"],
-        "expirationSeconds": 600
-    }
-}
-EOF
-)
-
-    # Use the existing safe_curl function to make the API request
-    token_response=$(safe_curl "$KUBE_API/apis/authentication.k8s.io/v1/namespaces/$namespace/serviceaccounts/$service_account/token" "POST" "$payload" \
-        "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json")
-
-    if [[ $? -eq 0 ]]; then
-        echo "$token_response" | jq -r '.status.token'
+    if [[ $exit_code -eq 0 ]]; then
+        echo "Command succeeded in pod $pod" >&2
+        echo "$response"
+        return 0
     else
-        echo "Failed to obtain token for service account $service_account in namespace $namespace" >&2
-        echo "" >&2
+        echo "Command failed in pod $pod with exit code $exit_code" >&2
+        echo "Response: $response" >&2
+        return 1
     fi
 }
 
-
-# Function to check if a pod's service account has access to the Kubernetes API
+# Function to check if a pod can execute 'kubectl get namespaces'
 check_pod_api_access() {
     local pod_name="$1"
     local namespace="$2"
 
     echo "Checking API access for pod: $pod_name in namespace: $namespace" >&2
 
-    # Get the service account name for the pod
-    echo "Retrieving service account name for pod $pod_name" >&2
-    service_account_name=$(safe_curl "$KUBE_API/api/v1/namespaces/$namespace/pods/$pod_name" "GET" "" \
-        "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json" | jq -r '.spec.serviceAccountName')
+    # Execute 'kubectl get namespaces' inside the pod
+    safe_exec "$pod_name" "$namespace" "kubectl get namespaces"
 
-    if [[ -z "$service_account_name" || "$service_account_name" == "null" ]]; then
-        echo "Service account name not found for pod $pod_name" >&2
-        metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 0"
-        return
-    fi
-    echo "Service account name: $service_account_name" >&2
-
-    # Request a token using TokenRequest API
-    pod_sa_token=$(request_token "$namespace" "$service_account_name")
-
-    if [[ -z "$pod_sa_token" ]]; then
-        echo "Token not found for service account $service_account_name" >&2
-        metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 0"
-        return
-    fi
-
-    # Use the token to attempt an API access check (e.g., list namespaces)
-    echo "Attempting to access Kubernetes API with pod's service account token" >&2
-    response=$(safe_curl "$KUBE_API/api/v1/namespaces" "GET" "" \
-        "-H" "Authorization: Bearer $pod_sa_token" "-H" "Content-Type: application/json")
-
-    if [[ $? -eq 0 && $response == *"NamespaceList"* ]]; then
+    if [[ $? -eq 0 ]]; then
         echo "Pod $pod_name has API access" >&2
         metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 1"
     else
@@ -153,16 +71,14 @@ collect_metrics() {
 
     # Loop over all namespaces and pods
     echo "Fetching list of namespaces" >&2
-    namespaces=$(safe_curl "$KUBE_API/api/v1/namespaces" "GET" "" \
-        "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json" | jq -r '.items[].metadata.name')
+    namespaces=$(kubectl get namespaces --no-headers -o custom-columns=":metadata.name")
 
     echo "Namespaces found: $namespaces" >&2
     for ns in $namespaces; do
         echo "Processing namespace: $ns" >&2
 
         echo "Fetching pods in namespace $ns" >&2
-        pods=$(safe_curl "$KUBE_API/api/v1/namespaces/$ns/pods" "GET" "" \
-            "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json" | jq -r '.items[].metadata.name')
+        pods=$(kubectl get pods -n "$ns" --no-headers -o custom-columns=":metadata.name")
 
         echo "Pods found in namespace $ns: $pods" >&2
         for pod in $pods; do
@@ -176,9 +92,6 @@ collect_metrics() {
 }
 
 # Configuration
-KUBE_API="https://kubernetes.default.svc"
-SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
-CA_CERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 METRICS_FILE="/tmp/metrics.log"
 CURRENT_MIN=$((10#$(date +%M)))
 RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"59"}  # Adjust as needed
