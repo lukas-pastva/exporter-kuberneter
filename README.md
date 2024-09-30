@@ -16,7 +16,7 @@ Usage
 deployments:
 
   exporter-kubernetes:
-    image: lukaspastva/exporter-kubernetes:1.0.2
+    image: lukaspastva/exporter-kubernetes:latest
     resources:
       limits:
         memory: 350Mi
