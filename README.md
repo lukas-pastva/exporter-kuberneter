@@ -11,6 +11,24 @@ Usage
 - Run it as Your k8s with approriate rights.
 - Feel free to use below helm-charts and settings
 
+### Cluster Role:
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-k8s-api-access-checker
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - namespaces
+      - serviceaccounts
+      - secrets
+    verbs:
+      - get
+      - list
+```
+
 License
 ==================
 - This is fully OpenSource tool.
