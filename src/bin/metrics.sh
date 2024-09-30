@@ -2,7 +2,7 @@
 
 echo "Starting script at $(date)" >&2
 
-# Function to escape label values
+# Function to escape label values for Prometheus
 escape_label_value() {
     local val="$1"
     val="${val//\\/\\\\}"  # Escape backslash
@@ -15,12 +15,7 @@ escape_label_value() {
 # Function to add metrics without duplication
 metric_add() {
     local metric="$1"
-    if ! grep -Fxq "$metric" "$METRICS_FILE"; then
-        echo "Adding metric: $metric" >&2
-        echo "$metric" >> "$METRICS_FILE"
-    else
-        echo "Duplicate metric found, not adding: $metric" >&2
-    fi
+    METRICS+="\n$metric"
 }
 
 # Function to handle kubectl exec commands with detailed error logging
@@ -32,7 +27,7 @@ safe_exec() {
     echo "Executing command in pod $pod (namespace: $namespace): $command" >&2
 
     # Execute the command inside the pod
-    response=$(kubectl exec "$pod" -n "$namespace" -- $command 2>&1)
+    response=$(kubectl exec "$pod" -n "$namespace" -- /bin/sh -c "$command" 2>&1)
     exit_code=$?
 
     if [[ $exit_code -eq 0 ]]; then
@@ -46,21 +41,43 @@ safe_exec() {
     fi
 }
 
-# Function to check if a pod can execute 'kubectl get namespaces'
+# Function to check if a pod can access the Kubernetes API
 check_pod_api_access() {
     local pod_name="$1"
     local namespace="$2"
 
     echo "Checking API access for pod: $pod_name in namespace: $namespace" >&2
 
-    # Execute 'kubectl get namespaces' inside the pod
-    safe_exec "$pod_name" "$namespace" "kubectl get namespaces"
+    # Define the API request command with conditional use of curl or wget
+    api_command='if command -v curl >/dev/null 2>&1; then
+                    curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+                         -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+                         https://kubernetes.default.svc/api/v1/namespaces
+                elif command -v wget >/dev/null 2>&1; then
+                    wget -qO- --ca-certificate=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+                         --header="Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+                         https://kubernetes.default.svc/api/v1/namespaces
+                else
+                    echo "no_curl_or_wget"
+                fi'
 
+    # Execute the API command inside the pod
+    response=$(safe_exec "$pod_name" "$namespace" "$api_command")
+
+    # Determine the metric based on the response
     if [[ $? -eq 0 ]]; then
-        echo "Pod $pod_name has API access" >&2
-        metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 1"
+        if [[ "$response" == "no_curl_or_wget" ]]; then
+            echo "Neither curl nor wget is available in pod $pod_name" >&2
+            metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} -1"
+        elif echo "$response" | grep -q '"default"'; then
+            echo "Pod $pod_name has API access" >&2
+            metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 1"
+        else
+            echo "Pod $pod_name does NOT have API access" >&2
+            metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 0"
+        fi
     else
-        echo "Pod $pod_name does NOT have API access" >&2
+        echo "Failed to execute API command in pod $pod_name" >&2
         metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 0"
     fi
 }
@@ -96,12 +113,13 @@ METRICS_FILE="/tmp/metrics.log"
 CURRENT_MIN=$((10#$(date +%M)))
 RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"59"}  # Adjust as needed
 EPOCH=$(date +%s)
+METRICS=""
 
 if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
     echo "Current minute ($CURRENT_MIN) is less than RUN_BEFORE_MINUTE ($RUN_BEFORE_MINUTE), starting metric collection" >&2
 
     echo "Clearing metrics file $METRICS_FILE" >&2
-    echo "" > "$METRICS_FILE"
+    METRICS=""
 
     echo "Adding initial metrics" >&2
     metric_add "# scraping start $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -115,4 +133,18 @@ else
     echo "Current minute ($CURRENT_MIN) is not less than RUN_BEFORE_MINUTE ($RUN_BEFORE_MINUTE), skipping metric collection" >&2
 fi
 
+# Write metrics to file (to be scraped by Prometheus)
+echo -e "$METRICS" > "$METRICS_FILE"
+
 echo "Script completed at $(date)" >&2
+
+# Optional: Serve metrics via HTTP (uncomment if needed)
+# Function to serve metrics via HTTP
+# serve_metrics() {
+#     while true; do
+#         echo -e "$METRICS" | nc -l -p 9100 -q 1
+#     done
+# }
+#
+# echo "Starting HTTP server to serve metrics on port 9100" >&2
+# serve_metrics
