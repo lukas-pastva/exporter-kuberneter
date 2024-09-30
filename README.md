@@ -29,6 +29,21 @@ rules:
       - list
 ```
 
+### PrometheusRules
+```yaml
+groups:
+  - name: PodAPIAccessAlerts
+    rules:
+      - alert: PodHasAPIAccess
+        expr: k8s_pod_api_access == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pod '{{ $labels.pod }}' has API access"
+          description: "Pod '{{ $labels.pod }}' in namespace '{{ $labels.namespace }}' has access to the Kubernetes API."
+```
+
 License
 ==================
 - This is fully OpenSource tool.
