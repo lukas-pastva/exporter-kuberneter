@@ -63,7 +63,6 @@ RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubec
     curl -LO "https://dl.k8s.io/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" && \
     echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c - && \
     chmod +x kubectl && \
-    mv kubectl /usr/local/bin/kubectl && \
     rm kubectl.sha256
 
 # Copy the Go binary from the builder stage
