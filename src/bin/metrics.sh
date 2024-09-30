@@ -24,18 +24,29 @@ metric_add() {
 # Function to handle retries for API requests and log requests and failures
 safe_curl() {
     local url="$1"
-    local retries=3
-    local wait_time=2
-    for i in $(seq 1 $retries); do
-        echo "$url" >> /tmp/curl_requests.log
-        response=$(curl -k -s -f --header "PRIVATE-TOKEN: $PRIVATE_TOKEN" "$url")
+    local method="${2:-GET}"
+    local data="${3:-}"
+    shift 3
+    local headers=("$@")
+    local retries=1
+    local wait_time=1
+
+    # Prefix each header with -H
+    local curl_headers=()
+    for header in "${headers[@]}"; do
+        curl_headers+=("-H" "$header")
+    done
+
+    for i in $(seq 1 "$retries"); do
+        echo "$method $url" >> /tmp/curl_requests.log
+        response=$(curl -k -s -f -X "$method" "${curl_headers[@]}" "$url" -d "$data")
         local exit_status=$?
         if [[ $exit_status -eq 0 ]]; then
             echo "$response"
             return 0
         fi
         echo "Attempt $i failed for URL: $url" >&2
-        sleep $wait_time
+        sleep "$wait_time"
     done
     echo "All $retries attempts failed for URL: $url" >&2
     echo "$url" >> /tmp/curl_failures.log
@@ -101,7 +112,7 @@ CURRENT_MIN=$((10#$(date +%M)))
 RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"5"}
 EPOCH=$(date +%s)
 
-if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
+# if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
     echo "" > /tmp/metrics.log
     echo "" > /tmp/curl_requests.log
     echo "" > /tmp/curl_failures.log
@@ -113,4 +124,4 @@ if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
 
     # Collect metrics once
     collect_metrics
-fi
+# fi
