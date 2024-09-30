@@ -3,7 +3,7 @@
 echo "Starting script at $(date)" >&2
 
 # Define system namespaces to exclude
-EXCLUDED_NAMESPACES=("kube-system" "kube-public" "kube-node-lease" "istio-system" "cilium" "your-other-system-namespaces")
+EXCLUDED_NAMESPACES=("kube-system" "kube-public" "kube-node-lease" "istio-system" "cilium")
 
 # Function to check if a namespace is excluded
 is_excluded_namespace() {
@@ -32,32 +32,25 @@ metric_add() {
     METRICS+="\n$metric"
 }
 
-# Function to handle kubectl exec commands with detailed error logging
+# Function to handle kubectl exec commands without echoing responses on failure
 safe_exec() {
     local pod="$1"
     local namespace="$2"
     local container="$3"
     local command="$4"
 
-    echo "Executing command in pod $pod (namespace: $namespace, container: $container): $command" >&2
-
     # Execute the command inside the pod
     if [[ -n "$container" ]]; then
-        response=$(kubectl exec "$pod" -n "$namespace" --container "$container" -- /bin/sh -c "$command" 2>&1)
+        # Specify the container if provided
+        response=$(kubectl exec "$pod" -n "$namespace" --container "$container" -- /bin/sh -c "$command" 2>/dev/null)
+        exit_code=$?
     else
-        response=$(kubectl exec "$pod" -n "$namespace" -- /bin/sh -c "$command" 2>&1)
+        # Default to the first container
+        response=$(kubectl exec "$pod" -n "$namespace" -- /bin/sh -c "$command" 2>/dev/null)
+        exit_code=$?
     fi
-    exit_code=$?
 
-    if [[ $exit_code -eq 0 ]]; then
-        echo "Command succeeded in pod $pod" >&2
-        echo "$response"
-        return 0
-    else
-        echo "Command failed in pod $pod with exit code $exit_code" >&2
-        echo "Response: $response" >&2
-        return 1
-    fi
+    return $exit_code
 }
 
 # Function to check if a pod can access the Kubernetes API
@@ -66,10 +59,7 @@ check_pod_api_access() {
     local namespace="$2"
     local container_name="$3"  # Optional: Specify container name if needed
 
-    echo "Checking API access for pod: $pod_name in namespace: $namespace" >&2
-
     # Define the API request command with conditional use of curl or wget
-    # First, check for curl. If not available, check for wget and its capabilities.
     api_command='
     if command -v curl >/dev/null 2>&1; then
         curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
@@ -90,24 +80,38 @@ check_pod_api_access() {
     fi'
 
     # Execute the API command inside the pod
-    response=$(safe_exec "$pod_name" "$namespace" "$container_name" "$api_command")
+    safe_exec "$pod_name" "$namespace" "$container_name" "$api_command"
+    exec_status=$?
 
-    # Determine the metric based on the response
-    if [[ $? -eq 0 ]]; then
-        if [[ "$response" == "no_curl_or_wget" || "$response" == "wget_no_ca_cert" ]]; then
-            echo "Neither curl nor a compatible wget is available in pod $pod_name" >&2
-            metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} -1"
-        elif echo "$response" | grep -q '"default"'; then
-            echo "Pod $pod_name has API access" >&2
-            metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 1"
+    # Initialize metric value
+    metric_value=0
+
+    if [[ $exec_status -eq 0 ]]; then
+        # Attempt to capture the response
+        # Use safe_exec to get the response
+        if [[ -n "$container_name" ]]; then
+            response=$(kubectl exec "$pod_name" -n "$namespace" --container "$container_name" -- /bin/sh -c "$api_command" 2>/dev/null)
         else
-            echo "Pod $pod_name does NOT have API access" >&2
-            metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 0"
+            response=$(kubectl exec "$pod_name" -n "$namespace" -- /bin/sh -c "$api_command" 2>/dev/null)
+        fi
+
+        if [[ "$response" == "no_curl_or_wget" || "$response" == "wget_no_ca_cert" ]]; then
+            # Neither curl nor a compatible wget is available
+            metric_value=-1
+        elif echo "$response" | grep -q '"default"'; then
+            # Successful API access
+            metric_value=1
+        else
+            # API access failed
+            metric_value=0
         fi
     else
-        echo "Failed to execute API command in pod $pod_name" >&2
-        metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 0"
+        # Execution failed (e.g., /bin/sh not found)
+        metric_value=-1
     fi
+
+    # Add the metric
+    metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} $metric_value"
 }
 
 # Function to collect metrics once
@@ -154,7 +158,6 @@ CURRENT_MIN=$((10#$(date +%M)))
 RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"59"}  # Adjust as needed
 EPOCH=$(date +%s)
 METRICS=""
-CONTAINER_NAME=""  # Specify the container name if necessary, else leave empty
 
 if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
     echo "Current minute ($CURRENT_MIN) is less than RUN_BEFORE_MINUTE ($RUN_BEFORE_MINUTE), starting metric collection" >&2
