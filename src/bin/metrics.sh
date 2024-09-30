@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "Starting script at $(date)"
+echo "Starting script at $(date)" >&2
 
 # Function to escape label values
 escape_label_value() {
@@ -23,7 +23,7 @@ metric_add() {
     fi
 }
 
-# Function to handle API requests without logging to stdout
+# Function to handle API requests with detailed error logging
 safe_curl() {
     local url="$1"
     local method="${2:-GET}"
@@ -31,24 +31,45 @@ safe_curl() {
     shift 3
     local headers=("$@")
 
-    # Prefix each header with -H
-    local curl_headers=()
-    for header in "${headers[@]}"; do
-        curl_headers+=("-H" "$header")
+    local max_retries=3
+    local attempt=1
+    local delay=5
+
+    while [[ $attempt -le $max_retries ]]; do
+        echo "Attempt $attempt: Making API request to URL: $url with method: $method" >&2
+
+        # Prefix each header with -H
+        local curl_headers=()
+        for header in "${headers[@]}"; do
+            curl_headers+=("-H" "$header")
+        done
+
+        local response
+        local http_code
+        response=$(curl -k -s -w "%{http_code}" -X "$method" "${curl_headers[@]}" "$url" -d "$data")
+        http_code="${response: -3}"
+        response="${response:0:${#response}-3}"
+
+        if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
+            echo "API request to $url succeeded on attempt $attempt" >&2
+            echo "$response"
+            return 0
+        else
+            echo "API request to $url failed with HTTP status $http_code on attempt $attempt" >&2
+            echo "Response body: $response" >&2
+            if [[ $attempt -lt $max_retries ]]; then
+                echo "Retrying in $delay seconds..." >&2
+                sleep $delay
+            fi
+        fi
+
+        ((attempt++))
     done
 
-    echo "Making API request to URL: $url with method: $method" >&2
-    response=$(curl -k -s -f -X "$method" "${curl_headers[@]}" "$url" -d "$data")
-    local exit_status=$?
-    if [[ $exit_status -eq 0 ]]; then
-        echo "API request to $url succeeded" >&2
-        echo "$response"
-        return 0
-    else
-        echo "API request to $url failed with status $exit_status" >&2
-        return 1
-    fi
+    echo "API request to $url failed after $max_retries attempts" >&2
+    return 1
 }
+
 
 # Function to request a token using the TokenRequest API
 request_token() {
@@ -71,18 +92,18 @@ request_token() {
 EOF
 )
 
+    # Use the existing safe_curl function to make the API request
     token_response=$(safe_curl "$KUBE_API/apis/authentication.k8s.io/v1/namespaces/$namespace/serviceaccounts/$service_account/token" "POST" "$payload" \
         "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json")
 
     if [[ $? -eq 0 ]]; then
         echo "$token_response" | jq -r '.status.token'
     else
+        echo "Failed to obtain token for service account $service_account in namespace $namespace" >&2
         echo "" >&2
     fi
 }
 
-# Function to add metrics without duplication
-# (Already defined above; ensure no duplication)
 
 # Function to check if a pod's service account has access to the Kubernetes API
 check_pod_api_access() {
@@ -160,7 +181,7 @@ SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
 CA_CERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 METRICS_FILE="/tmp/metrics.log"
 CURRENT_MIN=$((10#$(date +%M)))
-RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"59"}  # Adjusted default to match user's run
+RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"59"}  # Adjust as needed
 EPOCH=$(date +%s)
 
 if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
