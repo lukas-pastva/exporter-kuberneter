@@ -133,7 +133,6 @@ collect_metrics() {
     metric_add "k8s_api_access_heartbeat $(date +%s)"
 }
 
-# Configuration
 METRICS_FILE="/tmp/metrics.log"
 CURRENT_MIN=$((10#$(date +%M)))
 RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"5"}
@@ -147,7 +146,6 @@ if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
     metric_add "# HELP k8s_pod_api_access Whether a pod has access to the Kubernetes API."
     metric_add "# TYPE k8s_pod_api_access gauge"
 
-    # Collect metrics once
     collect_metrics
 else
     echo "Current minute ($CURRENT_MIN) is not less than RUN_BEFORE_MINUTE ($RUN_BEFORE_MINUTE), skipping metric collection" >&2
