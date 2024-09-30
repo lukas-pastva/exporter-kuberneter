@@ -15,6 +15,7 @@ metric_add() {
     local metric="$1"
     if ! grep -Fxq "$metric" "$METRICS_FILE"; then
         echo "$metric" >> "$METRICS_FILE"
+        echo "$metric"
     else
         echo "Duplicate metric found, not adding: $metric" >&2
     fi
@@ -23,29 +24,18 @@ metric_add() {
 # Function to handle retries for API requests and log requests and failures
 safe_curl() {
     local url="$1"
-    local method="${2:-GET}"
-    local data="${3:-}"
-    shift 3
-    local headers=("$@")
-    local retries=1
-    local wait_time=1
-
-    # Prefix each header with -H
-    local curl_headers=()
-    for header in "${headers[@]}"; do
-        curl_headers+=("-H" "$header")
-    done
-
-    for i in $(seq 1 "$retries"); do
-        echo "$method $url" >> /tmp/curl_requests.log
-        response=$(curl -k -s -f -X "$method" "${curl_headers[@]}" "$url" -d "$data")
+    local retries=3
+    local wait_time=2
+    for i in $(seq 1 $retries); do
+        echo "$url" >> /tmp/curl_requests.log
+        response=$(curl -k -s -f --header "PRIVATE-TOKEN: $PRIVATE_TOKEN" "$url")
         local exit_status=$?
         if [[ $exit_status -eq 0 ]]; then
             echo "$response"
             return 0
         fi
         echo "Attempt $i failed for URL: $url" >&2
-        sleep "$wait_time"
+        sleep $wait_time
     done
     echo "All $retries attempts failed for URL: $url" >&2
     echo "$url" >> /tmp/curl_failures.log
@@ -86,17 +76,8 @@ check_pod_api_access() {
     fi
 }
 
-# Function to initialize the metrics file with headers
-initialize_metrics() {
-    echo "# HELP k8s_pod_api_access Whether a pod has access to the Kubernetes API." > "$METRICS_FILE"
-    echo "# TYPE k8s_pod_api_access gauge" >> "$METRICS_FILE"
-}
-
 # Function to collect metrics once
 collect_metrics() {
-    # Clear and initialize the metrics file
-    initialize_metrics
-
     # Loop over all namespaces and pods
     namespaces=$(safe_curl "$KUBE_API/api/v1/namespaces" "GET" "" "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json" | jq -r '.items[].metadata.name')
 
@@ -115,7 +96,21 @@ collect_metrics() {
 KUBE_API="https://kubernetes.default.svc"
 SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
 CA_CERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-METRICS_FILE="/tmp/k8s_pod_api_access_metrics.prom"
+METRICS_FILE="/tmp/metrics.log"
+CURRENT_MIN=$((10#$(date +%M)))
+RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"5"}
+EPOCH=$(date +%s)
 
-# Collect metrics once
-collect_metrics
+if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
+    echo "" > /tmp/metrics.log
+    echo "" > /tmp/curl_requests.log
+    echo "" > /tmp/curl_failures.log
+
+    metric_add "# scraping start $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    metric_add "kubernetes_heart_beat ${EPOCH}"
+    metric_add "# HELP k8s_pod_api_access Whether a pod has access to the Kubernetes API."
+    metric_add "# TYPE k8s_pod_api_access gauge"
+
+    # Collect metrics once
+    collect_metrics
+fi
