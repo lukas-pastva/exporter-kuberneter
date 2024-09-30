@@ -26,16 +26,20 @@ escape_label_value() {
     echo -n "$val"
 }
 
-# Function to add metrics directly to the file without duplication
+# Initialize metrics array
+declare -a METRICS=()
+
+# Function to add metrics to the array without duplication
 metric_add() {
     local metric="$1"
-    if ! grep -Fxq "$metric" "$METRICS_FILE"; then
-        # echo "Adding metric: $metric" >&2
-        echo "$metric" >> "$METRICS_FILE"
-    else
-        echo "Duplicate metric found, not adding: $metric" >&2
-    fi
-    # echo ""
+    for existing_metric in "${METRICS[@]}"; do
+        if [[ "$existing_metric" == "$metric" ]]; then
+            echo "Duplicate metric found, not adding: $metric" >&2
+            return
+        fi
+    done
+    # echo "Adding metric: $metric" >&2
+    METRICS+=("$metric")
 }
 
 # Function to handle kubectl exec commands without echoing responses on failure
@@ -75,9 +79,9 @@ check_pod_api_access() {
             wget -qO- --ca-certificate /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
                  --header="Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
                  https://kubernetes.default.svc/api/v1/namespaces
-        else
-            echo "wget_no_ca_cert"
-        fi
+            else
+                echo "wget_no_ca_cert"
+            fi
     else
         echo "no_curl_or_wget"
     fi'
@@ -126,20 +130,21 @@ collect_metrics() {
         # echo "Pods found in namespace $ns: $pods" >&2
         for pod in $pods; do
             container_name=""
-            check_pod_api_access "$pod" "$ns" "$container_name" &
+            check_pod_api_access "$pod" "$ns" "$container_name"
         done
     done
-
-    metric_add "k8s_api_access_heartbeat $(date +%s)"
 }
 
 METRICS_FILE="/tmp/metrics.log"
 CURRENT_MIN=$((10#$(date +%M)))
+CURRENT_HOUR=$(date +"%-H")
+RUN_AT_HOUR=${RUN_AT_HOUR:-"1"}
 RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"5"}
 EPOCH=$(date +%s)
 
-if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
-    echo "" > "$METRICS_FILE"
+if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]] && [[ $CURRENT_HOUR -eq ${RUN_AT_HOUR} ]]; then
+    # Initialize metrics array
+    METRICS=()
 
     metric_add "# scraping start $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     metric_add "kubernetes_heart_beat ${EPOCH}"
@@ -147,6 +152,9 @@ if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
     metric_add "# TYPE k8s_pod_api_access gauge"
 
     collect_metrics
+
+    # Write metrics to file
+    printf "%s\n" "${METRICS[@]}" > "$METRICS_FILE"
 else
     echo "Current minute ($CURRENT_MIN) is not less than RUN_BEFORE_MINUTE ($RUN_BEFORE_MINUTE), skipping metric collection" >&2
 fi

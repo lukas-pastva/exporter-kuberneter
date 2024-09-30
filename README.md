@@ -31,6 +31,8 @@ deployments:
     env:
     - name: "RUN_BEFORE_MINUTE"
       value: "5"
+    - name: "RUN_AT_HOUR"
+      value: "1"
     serviceMonitor:
       enabled: true
       interval: 3600s
