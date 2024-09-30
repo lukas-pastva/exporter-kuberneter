@@ -37,9 +37,7 @@ safe_curl() {
     done
 
     for i in $(seq 1 "$retries"); do
-        # Log the request
         echo "$method $url" >> /tmp/curl_requests.log
-        # Perform the request
         response=$(curl -k -s -f -X "$method" "${curl_headers[@]}" "$url" -d "$data")
         local exit_status=$?
         if [[ $exit_status -eq 0 ]]; then
@@ -54,56 +52,44 @@ safe_curl() {
     return 1
 }
 
-# Function to authenticate with Vault using Kubernetes service account token
-authenticate_vault() {
-    local jwt=$(cat "/var/run/secrets/kubernetes.io/serviceaccount/token")
-    local payload=$(jq -n --arg jwt "$jwt" --arg role "$ROLE_NAME" '{"jwt": $jwt, "role": $role}')
-    local response=$(safe_curl "$VAULT_ADDR/v1/auth/kubernetes/login" "POST" "$payload" "-H" "Content-Type: application/json")
-    local vault_token=$(echo "$response" | jq -r '.auth.client_token')
-    if [[ -z "$vault_token" || "$vault_token" == "null" ]]; then
-        echo "Failed to authenticate with Vault." >&2
-        exit 1
-    fi
-    echo "$vault_token"
-}
+# Function to check if a pod's service account has access to the Kubernetes API
+check_pod_api_access() {
+    local pod_name="$1"
+    local namespace="$2"
 
-# Function to query Vault for a token's expiration using its accessor and write to the metrics file
-query_token_expiration() {
-    local description="$1"
-    local accessor="$2"
-    local vault_token="$3"
+    # Get the service account token for the pod
+    service_account_name=$(safe_curl "$KUBE_API/api/v1/namespaces/$namespace/pods/$pod_name" "GET" "" "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json" | jq -r '.spec.serviceAccountName')
 
-    local payload=$(jq -n --arg accessor "$accessor" '{"accessor": $accessor}')
-    local response=$(safe_curl "$VAULT_ADDR/v1/auth/token/lookup-accessor" "POST" "$payload" "-H" "Content-Type: application/json" "-H" "X-Vault-Token: $vault_token") || {
-        metric_add "vault_token_expiration_time_seconds{description=\"$(escape_label_value "$description")\", error=\"lookup_failed\"} -1"
+    if [[ -z "$service_account_name" ]]; then
+        metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 0"
         return
-    }
+    fi
 
-    local expire_time
-    expire_time=$(echo "$response" | jq -r '.data.expire_time')
+    # Fetch the service account token from the secret
+    secret_name=$(safe_curl "$KUBE_API/api/v1/namespaces/$namespace/serviceaccounts/$service_account_name" "GET" "" "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json" | jq -r '.secrets[0].name')
 
-    if [[ "$expire_time" != "null" && -n "$expire_time" ]]; then
-        # Convert ISO 8601 date to epoch seconds
-        local expiration_epoch=$(date -u -d "$expire_time" +"%s")
-        local current_epoch=$(date -u +%s)
-        local remaining_seconds=$((expiration_epoch - current_epoch))
+    if [[ -z "$secret_name" ]]; then
+        metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 0"
+        return
+    fi
 
-        # Prevent negative remaining time
-        if [[ "$remaining_seconds" -lt 0 ]]; then
-            remaining_seconds=0
-        fi
+    # Get the actual service account token
+    pod_sa_token=$(safe_curl "$KUBE_API/api/v1/namespaces/$namespace/secrets/$secret_name" "GET" "" "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json" | jq -r '.data.token' | base64 --decode)
 
-        # Write the metric
-        metric_add "vault_token_expiration_time_seconds{description=\"$(escape_label_value "$description")\"} $remaining_seconds"
+    # Use the token to attempt an API access check (e.g., list namespaces)
+    response=$(safe_curl "$KUBE_API/api/v1/namespaces" "GET" "" "-H" "Authorization: Bearer $pod_sa_token" "-H" "Content-Type: application/json")
+
+    if [[ $response == *"NamespaceList"* ]]; then
+        metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 1"
     else
-        metric_add "vault_token_expiration_time_seconds{description=\"$(escape_label_value "$description")\", error=\"lookup_failed\"} -1"
+        metric_add "k8s_pod_api_access{namespace=\"$(escape_label_value "$namespace")\", pod=\"$(escape_label_value "$pod_name")\"} 0"
     fi
 }
 
 # Function to initialize the metrics file with headers
 initialize_metrics() {
-    echo "# HELP vault_token_expiration_time_seconds The expiration time of Vault tokens in seconds from now." > "$METRICS_FILE"
-    echo "# TYPE vault_token_expiration_time_seconds gauge" >> "$METRICS_FILE"
+    echo "# HELP k8s_pod_api_access Whether a pod has access to the Kubernetes API." > "$METRICS_FILE"
+    echo "# TYPE k8s_pod_api_access gauge" >> "$METRICS_FILE"
 }
 
 # Function to collect metrics once
@@ -111,33 +97,25 @@ collect_metrics() {
     # Clear and initialize the metrics file
     initialize_metrics
 
-    # Authenticate with Vault
-    local vault_token=$(authenticate_vault)
+    # Loop over all namespaces and pods
+    namespaces=$(safe_curl "$KUBE_API/api/v1/namespaces" "GET" "" "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json" | jq -r '.items[].metadata.name')
 
-    # Read accessors and query their expiration
-    while IFS=: read -r description accessor || [[ -n "$description" ]]; do
-        query_token_expiration "$description" "$accessor" "$vault_token"
-    done < "$ACCESSORS_FILE"
+    for ns in $namespaces; do
+        pods=$(safe_curl "$KUBE_API/api/v1/namespaces/$ns/pods" "GET" "" "-H" "Authorization: Bearer $SA_TOKEN" "-H" "Content-Type: application/json" | jq -r '.items[].metadata.name')
+        for pod in $pods; do
+            check_pod_api_access "$pod" "$ns"
+        done
+    done
 
     # Add a heartbeat metric
-    metric_add "vault_heart_beat $(date +%s)"
+    metric_add "k8s_api_access_heartbeat $(date +%s)"
 }
 
-# set -euo pipefail
 # Configuration
-VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
-ACCESSORS_FILE="/vault/secrets/vault-accessors"
-METRICS_FILE="/tmp/metrics.log"
-ROLE_NAME="${ROLE_NAME:-your_role_name}"
-CURRENT_MIN=$((10#$(date +%M)))
-RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"5"}
+KUBE_API="https://kubernetes.default.svc"
+SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+CA_CERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+METRICS_FILE="/tmp/k8s_pod_api_access_metrics.prom"
 
-if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]]; then
-    # Initialize logs
-    : > /tmp/metrics.log
-    : > /tmp/curl_requests.log
-    : > /tmp/curl_failures.log
-
-    # Collect metrics once
-    collect_metrics
-fi
+# Collect metrics once
+collect_metrics
