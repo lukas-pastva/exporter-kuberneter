@@ -11,22 +11,80 @@ Usage
 - Run it as Your k8s with approriate rights.
 - Feel free to use below helm-charts and settings
 
-### Cluster Role:
+### Helm-chartie values
 ```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: pod-k8s-api-access-checker
-rules:
-  - apiGroups: [""]
+deployments:
+
+  exporter-kubernetes:
+    image: lukaspastva/exporter-kubernetes:1.0
     resources:
-      - pods
-      - namespaces
-      - serviceaccounts
-      - secrets
-    verbs:
-      - get
-      - list
+      limits:
+        memory: 50Mi
+      requests:
+        cpu: 30m
+        memory: 30Mi
+    # TODO podSecurityContextRestricted: true
+    ports:
+      - name: http
+        port: 9199
+    serviceMonitor:
+      enabled: true
+      interval: 3600s
+
+extraObjects:
+
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRole
+  metadata:
+    name: exporter-kubernetes
+  rules:
+    - apiGroups: [""]
+      resources:
+        - pods
+        - namespaces
+        - serviceaccounts
+        - secrets
+      verbs:
+        - get
+        - list
+
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRoleBinding
+  metadata:
+    name: exporter-kubernetes
+  subjects:
+    - kind: ServiceAccount
+      name: exporter-kubernetes
+      namespace: exporter
+  roleRef:
+    kind: ClusterRole
+    name: exporter-kubernetes
+    apiGroup: rbac.authorization.k8s.io
+
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: exporter-kubernetes
+    namespace: exporter
+  rules:
+    - apiGroups: ["authentication.k8s.io"]
+      resources: ["tokenrequests"]
+      verbs: ["create"]
+
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: exporter-kubernetes
+    namespace: exporter
+  subjects:
+    - kind: ServiceAccount
+      name: exporter-kubernetes
+      namespace: exporter
+  roleRef:
+    kind: Role
+    name: exporter-kubernetes
+    apiGroup: rbac.authorization.k8s.io
+
 ```
 
 ### PrometheusRules
