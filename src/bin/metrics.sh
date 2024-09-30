@@ -143,7 +143,6 @@ RUN_BEFORE_MINUTE=${RUN_BEFORE_MINUTE:-"5"}
 EPOCH=$(date +%s)
 
 if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]] && [[ $CURRENT_HOUR -eq ${RUN_AT_HOUR} ]]; then
-    # Initialize metrics array
     METRICS=()
 
     metric_add "# scraping start $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
