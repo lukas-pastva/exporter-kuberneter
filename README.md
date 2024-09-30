@@ -28,6 +28,9 @@ deployments:
       - name: http
         port: 9199
     rbacDisabled: true
+    env:
+    - name: "RUN_BEFORE_MINUTE"
+      value: "5"
     serviceMonitor:
       enabled: true
       interval: 3600s
