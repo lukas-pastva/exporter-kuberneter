@@ -1,10 +1,5 @@
 #!/bin/bash
 
-echo "Starting script at $(date)" >&2
-
-# Define system namespaces to exclude
-EXCLUDED_NAMESPACES=("kube-system" "kube-public" "kube-node-lease" "istio-system" "cilium")
-
 # Function to check if a namespace is excluded
 is_excluded_namespace() {
     local ns="$1"
@@ -135,7 +130,7 @@ collect_metrics() {
     done
 }
 
-METRICS_FILE="/tmp/metrics.log"
+EXCLUDED_NAMESPACES=("kube-system" "kube-public" "kube-node-lease" "istio-system" "cilium")
 CURRENT_MIN=$((10#$(date +%M)))
 CURRENT_HOUR=$(date +"%-H")
 RUN_AT_HOUR=${RUN_AT_HOUR:-"1"}
@@ -153,7 +148,5 @@ if [[ $CURRENT_MIN -lt ${RUN_BEFORE_MINUTE} ]] && [[ $CURRENT_HOUR -eq ${RUN_AT_
     collect_metrics
 
     # Write metrics to file
-    printf "%s\n" "${METRICS[@]}" > "$METRICS_FILE"
-else
-    echo "Current minute ($CURRENT_MIN) is not less than RUN_BEFORE_MINUTE ($RUN_BEFORE_MINUTE), skipping metric collection" >&2
+    printf "%s\n" "${METRICS[@]}" > "/tmp/metrics.log"
 fi
