@@ -10,6 +10,7 @@ Usage
 
 - Run it as Your k8s with approriate rights.
 - Feel free to use below helm-charts and settings
+- Exporter will "kubectl exec" inside each pod and will try to execute "kubectl get namespaces". If it will succeed, it will log value "1".
 
 ### Helm-chartie values
 ```yaml
